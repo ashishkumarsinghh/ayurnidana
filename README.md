@@ -1,0 +1,102 @@
+# AyurNidana (आयुर्निदान)
+**Systematic Ayurvedic Clinical Diagnostic & Treatment Expert System**
+
+> *रोगमादौ परीक्षेत ततोऽनन्तरमौषधम्।*
+> *(First examine the disease and the patient thoroughly, then administer the medicine — Charaka Samhita, Sutrasthana 20:20)*
+
+AyurNidana is an interactive, clinically validated expert system for classical Ayurvedic diagnosis (Nidana) and multi-tier therapeutic management (Chikitsa). It bridges the timeless wisdom of the *Brihat Trayi* (Charaka Samhita, Sushruta Samhita, Ashtanga Hridaya) and *Laghu Trayi* (Madhava Nidana, Sharngadhara Samhita, Bhavaprakasha) with modern interactive computing, Google NotebookLM, and Google Gemini AI models.
+
+---
+
+## 🌟 Key Capabilities
+
+### 1. Rogi Pariksha (Patient Examination)
+- **Trividha Pariksha**: Darshana (inspection), Sparshana (palpation/pulse), and Prashna (interrogation).
+- **Ashta Sthana Pariksha**: 8-fold diagnostic system:
+  - *Nadi* (Pulse: Sarpa/Manduka/Hamsa/Mixed velocities)
+  - *Jihva* (Tongue: coating, fissures, papillae, Ama indicators)
+  - *Mutra* (Urine: color, clarity, burning sensations)
+  - *Mala* (Stool: consistency, Jala Nimajjana float test for Ama)
+  - *Shabda* (Voice & internal auscultatory sounds)
+  - *Sparsha* (Skin temperature, turgor, moisture)
+  - *Druk* (Ocular signs, scleral hue, edema)
+  - *Akruti* (Physical somatic habitus, posture, gait)
+- **Dashavidha Pariksha**: 10-fold assessment of patient constitutional reserve (*Bala*):
+  - *Prakriti*, *Vikriti*, *Sara*, *Samhanana*, *Pramana*, *Satmya*, *Sattva*, *Ahara Shakti*, *Vyayama Shakti*, and *Vaya*.
+
+### 2. Roga Pariksha & Nidana Panchaka (Systemic Diagnosis)
+- **Mathematical Doshic Engine**: Computes exact percentage distribution for *Vata*, *Pitta*, and *Kapha*, identifying unmixed, *Dvandvaja*, or *Sannipataja* states.
+- **Nidana Panchaka**: Complete 5-fold clinical reasoning:
+  1. *Nidana* (Aetiological factors: Aharaja, Viharaja, Manasika)
+  2. *Purvarupa* (Premonitory warning signs)
+  3. *Rupa* (Cardinal manifest clinical features)
+  4. *Upashaya & Anupashaya* (Alleviating vs aggravating therapeutic tests)
+  5. *Samprapti* (Pathogenesis across the 6 stages of *Shat Kriya Kala*)
+- **Dhatu & Srotas Vitiation Mapping**: Maps symptoms to bodily tissues (*Rasa*, *Rakta*, *Mamsa*, *Meda*, *Asthi*, *Majja*, *Shukra*) and bodily channels (*Pranavaha*, *Annavaha*, etc.).
+- **Ama & Agni Evaluation**: Rigorous differentiation between *Sama* (endotoxic) vs *Nirama* (non-toxic) states.
+
+### 3. Multi-Tier Chikitsa Blueprint (Treatment)
+- **Phase 1: Deepana & Pachana**: Digestive fire rekindling and Ama digestion prior to heavy tonics or cleansing.
+- **Phase 2: Shamana Formulations**: Classical prescription table specifying drug name, category (Churna, Vati, Kwatha, Asava, Ghrita, Rasayana), classical indication, exact dosage, Anupana (adjuvant vehicle), Aushadha Sevana Kala (circadian timing relative to meals), and classical literature citations.
+- **Phase 3: Shodhana / Panchakarma Roadmap**: Evaluates patient safety, age limits, Rogi Bala, and active Ama contraindications. Outlines *Purvakarma* (Snehana/Swedana), *Pradhanakarma* (Vamana, Virechana, Basti, Nasya, Raktamokshana), and *Paschatkarma* (*Samsarjana Krama* dietary ladder).
+- **Phase 4: Pathya-Apathya Regimen**: Exhaustive lists of wholesome vs prohibited foods and lifestyle habits.
+- **Phase 5: Viruddha Ahara Warnings**: Highlighting classical food-combining incompatibilities (e.g., fish with milk, heated honey, fruit with dairy).
+- **Phase 6: Yoga & Pranayama**: Condition-specific Asanas and Pranayamas.
+- **Phase 7: Rasayana & Tissue Recovery**: Rejuvenation and tissue revitalization.
+- **Phase 8: Modern Clinical Red Flags**: Emergency triage alerts requiring immediate allopathic emergency referral.
+
+### 4. Integration with Google NotebookLM & Local Treatises
+- **Google NotebookLM Bridge**: Interfaces with the user's Google account to connect directly to the **'ayurveda'** notebook via `notebooklm-py`.
+- **Local Treatise Library**: Direct scanner and citation index for the 100+ classical treatises stored in the user's OneDrive/Documents/ayurveda library.
+- **AI Vaidya Clinical Co-Pilot**: Deep reasoning co-pilot powered by Google Gemini, grounded in Brihat Trayi doctrine.
+
+---
+
+## 🚀 Quick Start (WSL)
+
+### 1. Environment Activation
+```bash
+cd /home/ashish/projects/ayurnidana
+source .venv/bin/activate
+```
+
+### 2. Launch the Interactive Application
+```bash
+streamlit run ayurnidana/ui/app.py --server.port=8501 --server.headless=true
+```
+
+Open your browser at `http://localhost:8501`.
+
+### 3. Connect to Google NotebookLM
+To link the CLI directly to your Google account:
+```bash
+notebooklm login
+```
+Once logged in, AyurNidana will automatically detect and query your `ayurveda` notebook.
+
+---
+
+## 📁 Project Structure
+```
+ayurnidana/
+├── .venv/                         # Virtual environment (Python 3.12)
+├── .env                           # GEMINI_API_KEY and library paths
+├── pyproject.toml                 # Package configuration
+├── README.md                      # Documentation
+├── ayurnidana/
+│   ├── core/                      # Diagnostic & Therapeutic Engines
+│   │   ├── models.py              # Pydantic schemas (Patient, Diagnosis, Chikitsa)
+│   │   ├── dosha_engine.py        # Doshic calculation & Ama assessment
+│   │   ├── ashta_sthana.py        # 8-fold examination wizard (Nadi, Jihva, etc.)
+│   │   ├── dashavidha.py          # 10-fold patient stamina & Bala evaluator
+│   │   ├── nidana_engine.py       # Disease mapper & Nidana Panchaka builder
+│   │   └── chikitsa_engine.py     # 8-phase systematic treatment protocol generator
+│   ├── knowledge/                 # Knowledge bases & AI Bridges
+│   │   ├── classical_db.py        # Database of 45+ classical conditions & formulas
+│   │   ├── notebook_bridge.py     # Google NotebookLM connector ('ayurveda' notebook)
+│   │   ├── local_library.py       # Scanner for 100+ classical treatises in user docs
+│   │   └── ai_consultant.py       # Gemini 2.5 AI clinical co-pilot
+│   └── ui/                        # Web User Interface
+│       ├── app.py                 # Main Streamlit application
+│       └── components/            # Styles, radar/bar charts, case sheets
+```
