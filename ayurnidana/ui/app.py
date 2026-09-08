@@ -15,7 +15,7 @@ import json
 
 from ayurnidana.core.models import (
     PatientDemographics, AshtaSthanaPariksha, DashavidhaPariksha,
-    Gender, AgniType, KoshthaType, ClinicalCase
+    Gender, AgniType, KoshthaType, AmaStatus, Prognosis, PrakritiType, ClinicalCase
 )
 from ayurnidana.core.dosha_engine import DoshaEngine
 from ayurnidana.core.ashta_sthana import ASHTA_STHANA_CATALOG, AshtaSthanaEvaluator
@@ -563,12 +563,33 @@ with tab4:
     with nb_col1:
         st.markdown("#### Connection Dashboard")
         st.write(f"**Target Notebook:** `ayurveda`")
-        st.write(f"**NotebookLM Storage:** `{bridge.auth_storage_path}`")
         if auth_status["authenticated"]:
-            st.success("CLI Session: Connected")
+            st.success("✅ Google NotebookLM: Connected")
+            conn = bridge.connect_to_ayurveda_notebook()
+            if conn["connected"]:
+                st.info(f"Active: **{conn['title']}** (`{conn['notebook_id'][:8]}...`)")
+            else:
+                st.warning("Notebook 'ayurveda' ready for queries")
         else:
-            st.warning("CLI Session: Pending Login")
-            st.code("notebooklm login", language="bash")
+            st.warning("⚠️ Google NotebookLM: Login Required")
+            if st.button("🔑 Launch Google Sign-In Window", type="primary"):
+                import subprocess
+                try:
+                    subprocess.Popen([
+                        "cmd.exe", "/c", "start", "powershell", "-NoExit", "-Command",
+                        "python -m notebooklm login"
+                    ])
+                    st.info("Opened login terminal on your desktop. Complete sign-in, then click 'Refresh Status'.")
+                except Exception as e:
+                    st.error(f"Error launching login: {e}")
+
+            if st.button("🔄 Refresh Status"):
+                st.rerun()
+
+        custom_nb_id = st.text_input("Or enter Notebook ID directly (optional):", value=bridge.active_notebook_id or "")
+        if custom_nb_id:
+            bridge.active_notebook_id = custom_nb_id
+            st.caption(f"Target Notebook ID set to: `{custom_nb_id}`")
 
         st.markdown("#### Search Local Classical Treatises")
         search_kw = st.text_input("Search Charaka, Sushruta, Madhava Nidana, etc.:", value="Sandhivata")
