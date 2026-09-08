@@ -1,6 +1,14 @@
 """AyurNidana - Interactive Ayurvedic Clinical Diagnostic & Treatment Expert System.
 Integrates classical Ayurvedic methodology with Google NotebookLM and local treatise knowledge base.
 """
+import sys
+import os
+
+# Ensure the root project directory is in sys.path
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import streamlit as st
 import pandas as pd
 import json
