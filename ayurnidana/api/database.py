@@ -3,7 +3,12 @@ import os
 import hashlib
 import json
 
-_DB_PATH = os.path.join(os.path.dirname(__file__), "../..", "data", "ayurnidana_v2.db")
+
+if os.environ.get("VERCEL"):
+    _DB_PATH = "/tmp/ayurnidana_v2.db"
+else:
+    _DB_PATH = os.path.join(os.path.dirname(__file__), "../..", "data", "ayurnidana_v2.db")
+
 
 def _db():
     os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
