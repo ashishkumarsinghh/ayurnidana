@@ -16,7 +16,8 @@ class ChikitsaEngine:
         diagnosis: DiagnosisResult,
         dashavidha: DashavidhaPariksha,
         patient_age: int,
-        season: str
+        comorbidities: str = "",
+        season: str = "Sharad (Autumn)"
     ) -> TreatmentPlan:
         
         # 1. Fetch template or default classical data
@@ -27,8 +28,187 @@ class ChikitsaEngine:
                 break
 
         if not matched_disease:
-            # Fallback to sandhivata
-            matched_disease = CLASSICAL_DISEASES["sandhivata"]
+            # Universal Dynamic Classical Chikitsa based on Doshic & Srotas Dominance
+            doshic_text = (diagnosis.doshic_subtype + " " + diagnosis.primary_condition).lower()
+            
+            if "pitta" in doshic_text:
+                dominant = "Pitta"
+                dyn_formulations = [
+                    {
+                        "name": "Kaishora Guggulu",
+                        "category": "Vati / Guggulu",
+                        "classical_indication": "Pacifies systemic Pitta, detoxifies Rakta Dhatu, and purifies inflamed micro-channels.",
+                        "dosage": "2 tablets (500mg each) twice daily",
+                        "anupana_vehicle": "Warm water or Manjishtadi Kwatha",
+                        "aushadha_sevana_kala": "Madhyabhakta (Mid-meals)",
+                        "duration_weeks": 6,
+                        "classical_reference": "Bhaishajya Ratnavali, Vataraktadhikara"
+                    },
+                    {
+                        "name": "Chandanasava",
+                        "category": "Asava / Arishta",
+                        "classical_indication": "Cooling herbal tonic; dispels burning sensation, regulates internal heat, and pacifies irritated mucosal membranes.",
+                        "dosage": "20 ml with equal water twice daily",
+                        "anupana_vehicle": "Equal quantity of water",
+                        "aushadha_sevana_kala": "Adhobhakta (Immediately after meals)",
+                        "duration_weeks": 6,
+                        "classical_reference": "Bhaishajya Ratnavali"
+                    },
+                    {
+                        "name": "Avipattikara Churna",
+                        "category": "Churna",
+                        "classical_indication": "Gentle Pitta pacifier and downward laxative (Anulomana); clears acid toxins and regulates digestive secretion.",
+                        "dosage": "3-5g at bedtime",
+                        "anupana_vehicle": "Warm water",
+                        "aushadha_sevana_kala": "Nishi (At bedtime)",
+                        "duration_weeks": 4,
+                        "classical_reference": "Bhaishajya Ratnavali, Amlapittadhikara"
+                    }
+                ]
+                dyn_pk = {
+                    "eligible": True,
+                    "recommended_therapy": "Mridu Virechana (Therapeutic Purgation)",
+                    "reasoning": "Virechana is the supreme classical Shodhana for vitiated Pitta (Virechanam Pittaharanam - Charaka).",
+                    "purvakarma": ["Snehana with Tikta Ghrita", "Sarvanga Swedana"],
+                    "pradhanakarma": "Virechana with Avipattikara Churna or Trivrit Lehya",
+                    "paschatkarma": ["Samsarjana Krama (graduated digestive diet)"]
+                }
+                dyn_pathya_ahara = [
+                    "Sweet ripe seasonal fruits, melons, coconut water, cucumber",
+                    "Aged barley, basmati rice, mung dal soup with cow's A2 ghee",
+                    "Cooling infusions with coriander and fennel seeds"
+                ]
+                dyn_apathya_ahara = [
+                    "Excessively spicy foods, red chilies, mustard, vinegar",
+                    "Deep-fried items, alcohol, fermented sour curd at night",
+                    "Skipping meals or fasting in intense daytime heat"
+                ]
+            elif "kapha" in doshic_text:
+                dominant = "Kapha"
+                dyn_formulations = [
+                    {
+                        "name": "Kanchanara Guggulu",
+                        "category": "Vati / Guggulu",
+                        "classical_indication": "Scrapes deep metabolic deposits (Medohara & Lekhana); clears Srotas obstructions and reduces swellings.",
+                        "dosage": "2 tablets (500mg each) twice daily",
+                        "anupana_vehicle": "Warm water or Punarnavadi Kwatha",
+                        "aushadha_sevana_kala": "Pragbhakta (30 mins before meals)",
+                        "duration_weeks": 8,
+                        "classical_reference": "Sharangadhara Samhita"
+                    },
+                    {
+                        "name": "Punarnavadi Kwatha",
+                        "category": "Kwatha",
+                        "classical_indication": "Eliminates stagnant cellular fluid, cleanses micro-channels, and stimulates renal/metabolic output.",
+                        "dosage": "20 ml with 40 ml warm water twice daily",
+                        "anupana_vehicle": "Warm water",
+                        "aushadha_sevana_kala": "Pragbhakta (Before meals)",
+                        "duration_weeks": 6,
+                        "classical_reference": "Bhaishajya Ratnavali"
+                    },
+                    {
+                        "name": "Trikatu Churna",
+                        "category": "Churna",
+                        "classical_indication": "Deepana-Pachana trio (Shunthi, Maricha, Pippali); incinerates Kapha mucus and elevates sluggish metabolic rate.",
+                        "dosage": "1.5g twice daily with raw honey",
+                        "anupana_vehicle": "Raw honey or warm water",
+                        "aushadha_sevana_kala": "Madhyabhakta (Mid-meals)",
+                        "duration_weeks": 4,
+                        "classical_reference": "Charaka Samhita"
+                    }
+                ]
+                dyn_pk = {
+                    "eligible": True,
+                    "recommended_therapy": "Ruksha Swedana & Vamana / Nasya",
+                    "reasoning": "Ruksha (dry) therapies and upper channel cleansing eradicate dense Kapha accumulation.",
+                    "purvakarma": ["Ruksha Sweda with sand/herbal poultice"],
+                    "pradhanakarma": "Nasya or Mridu Shodhana according to strength",
+                    "paschatkarma": ["Light spicy digestive soup (Mudga-Yusha)"]
+                }
+                dyn_pathya_ahara = [
+                    "Barley (Yava), horsegram (Kulattha), warm spiced vegetable soups",
+                    "Honey, bitter vegetables (bitter gourd, radish), ginger tea",
+                    "Light roasted grains with black pepper and cumin"
+                ]
+                dyn_apathya_ahara = [
+                    "Heavy dairy, ice cream, deep-fried snacks, sweets",
+                    "Cold refrigerated drinks, white sugar, refined flour",
+                    "Day sleeping immediately after heavy lunches"
+                ]
+            else:
+                dominant = "Vata"
+                dyn_formulations = [
+                    {
+                        "name": "Yogaraja Guggulu",
+                        "category": "Vati / Guggulu",
+                        "classical_indication": "Premier classical Vata-shamaka compound; calms nervous tremors, joint stiffness, and musculoskeletal aches.",
+                        "dosage": "2 tablets (500mg each) twice daily",
+                        "anupana_vehicle": "Warm water or Dashamula Kwatha",
+                        "aushadha_sevana_kala": "Madhyabhakta (Mid-meals)",
+                        "duration_weeks": 8,
+                        "classical_reference": "Bhaishajya Ratnavali"
+                    },
+                    {
+                        "name": "Dashamula Kwatha",
+                        "category": "Kwatha",
+                        "classical_indication": "Decoction of ten classical medicinal roots; pacifies all sub-types of Vayu and relieves spasms and tension.",
+                        "dosage": "20 ml diluted with 40 ml warm water twice daily",
+                        "anupana_vehicle": "Warm water with 1/2 tsp cow's ghee",
+                        "aushadha_sevana_kala": "Pragbhakta (30 mins before food)",
+                        "duration_weeks": 6,
+                        "classical_reference": "Charaka Samhita"
+                    },
+                    {
+                        "name": "Ashwagandharishta",
+                        "category": "Asava / Arishta",
+                        "classical_indication": "Nourishes Majja Dhatu, stabilizes Pranavayu, enhances Ojas, and relieves chronic fatigue and nervous exhaustion.",
+                        "dosage": "20 ml with equal warm water twice daily",
+                        "anupana_vehicle": "Equal quantity of water",
+                        "aushadha_sevana_kala": "Adhobhakta (Immediately after meals)",
+                        "duration_weeks": 8,
+                        "classical_reference": "Bhaishajya Ratnavali"
+                    }
+                ]
+                dyn_pk = {
+                    "eligible": True,
+                    "recommended_therapy": "Snigdha Snehana & Matra Basti (Medicated Enema)",
+                    "reasoning": "Basti is the supreme therapy for Vata ('Basti Vataharanam Shreshtham' - Charaka Sutrasthana 25).",
+                    "purvakarma": ["Sarvanga Abhyanga with warm sesame or Dhanwantaram Taila", "Bashpa Sweda"],
+                    "pradhanakarma": "Matra Basti with 60ml warm Sahacharadi Taila",
+                    "paschatkarma": ["Warm bath and light nourishing gruel"]
+                }
+                dyn_pathya_ahara = [
+                    "Warm cooked grains, basmati rice, moong dal with cow's ghee",
+                    "Sweet ripe fruits, warm spiced milk with cardamom",
+                    "Nourishing soups with sweet potato, carrots, and pumpkin"
+                ]
+                dyn_apathya_ahara = [
+                    "Dry crackers, cold raw salads, ice water, carbonated drinks",
+                    "Excess caffeine, chickpeas, raw pulses",
+                    "Erratic fasting and late-night snacking"
+                ]
+
+            matched_disease = {
+                "shamana_formulations": dyn_formulations,
+                "panchakarma": dyn_pk,
+                "pathya_ahara": dyn_pathya_ahara,
+                "apathya_ahara": dyn_apathya_ahara,
+                "pathya_vihara": [
+                    "Maintain regular daily rhythm (Dinacharya)",
+                    "Sleep by 10 PM in quiet, dark environment",
+                    "Daily warm self-massage (Abhyanga) suited to constitution"
+                ],
+                "apathya_vihara": [
+                    "Suppression of natural physiological urges",
+                    "Erratic late night sleeping and intense sensory over-stimulation",
+                    "Physical strain beyond 50% capacity (Ardha Shakti)"
+                ],
+                "yoga_pranayama": [
+                    "Nadi Shodhana Pranayama (Alternate nostril breathing - 15 mins daily)",
+                    "Gentle Surya Namaskara with breath synchronization",
+                    "Shavasana with mindfulness meditation"
+                ]
+            }
 
         # 2. Phase 1: Deepana & Pachana Protocol (Metabolic Preparation)
         deepana_protocol = []

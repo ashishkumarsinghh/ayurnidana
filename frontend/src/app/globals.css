@@ -1,0 +1,64 @@
+@import "tailwindcss";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+:root {
+  --background: #ffffff;
+  --foreground: #000000;
+}
+
+@layer base {
+  * {
+    @apply border-zinc-200 outline-zinc-300;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}
+
+@media print {
+  @page { margin: 1cm; size: A4 portrait; }
+  
+  body { 
+    background: white !important; 
+    font-size: 11pt !important; 
+    color: black !important; 
+  }
+  
+  .no-print { 
+    display: none !important; 
+  }
+  
+  /* Force a compact 1-page layout by scaling everything down slightly and avoiding breaks */
+  main { 
+    transform: scale(0.85); 
+    transform-origin: top center; 
+    width: 115%; 
+  }
+  
+  /* Avoid breaking sections across pages */
+  .avoid-break { 
+    page-break-inside: avoid; 
+    break-inside: avoid; 
+  }
+  
+  /* Remove shadows and heavy backgrounds for printing */
+  * { 
+    box-shadow: none !important; 
+  }
+  
+  .print-border { 
+    border: 1px solid #ccc !important; 
+  }
+}

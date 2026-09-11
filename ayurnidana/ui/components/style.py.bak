@@ -1,0 +1,110 @@
+"""Vedic-Modern Aesthetic Styling and CSS for AyurNidana.
+Designed with patient wellness, calm elegance, and intuitive usability in mind.
+"""
+
+CUSTOM_CSS = """
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Playfair+Display:ital,wght@0,600;0,700;1,400&display=swap');
+
+    html, body, [class*="css"] {
+        font-family: 'Plus Jakarta Sans', sans-serif;
+    }
+
+    h1, h2, h3, .brand-font {
+        font-family: 'Playfair Display', serif;
+    }
+
+    /* Clean Card Container */
+    .ayur-card {
+        background: #FFFFFF;
+        border-radius: 14px;
+        padding: 1.5rem 1.8rem;
+        border: 1px solid #EAE5DC;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.03);
+        margin-bottom: 1.2rem;
+    }
+
+    .ayur-hero {
+        background: linear-gradient(135deg, #FAF6EE 0%, #F5EFE3 100%);
+        border-radius: 16px;
+        padding: 2rem 2.2rem;
+        border: 1px solid #E5DCCE;
+        margin-bottom: 1.5rem;
+    }
+
+    /* Auth Box */
+    .auth-container {
+        max-width: 520px;
+        margin: 2rem auto;
+        background: #FFFFFF;
+        border-radius: 18px;
+        padding: 2.2rem 2.5rem;
+        border: 1px solid #EAE5DC;
+        box-shadow: 0 10px 30px rgba(140, 67, 24, 0.06);
+    }
+
+    /* Section highlight boxes */
+    .ayur-highlight-gold {
+        background: #FFFDF9;
+        border-left: 5px solid #C05621;
+        border-radius: 10px;
+        padding: 1.2rem 1.4rem;
+        margin-bottom: 1rem;
+        border-top: 1px solid #F6E05E33;
+        border-right: 1px solid #F6E05E33;
+        border-bottom: 1px solid #F6E05E33;
+    }
+
+    .ayur-highlight-green {
+        background: #F8FAF7;
+        border-left: 5px solid #2F855A;
+        border-radius: 10px;
+        padding: 1.2rem 1.4rem;
+        margin-bottom: 1rem;
+        border-top: 1px solid #9AE6B433;
+        border-right: 1px solid #9AE6B433;
+        border-bottom: 1px solid #9AE6B433;
+    }
+
+    .ayur-highlight-red {
+        background: #FFF5F5;
+        border-left: 5px solid #E53E3E;
+        border-radius: 10px;
+        padding: 1.2rem 1.4rem;
+        margin-bottom: 1rem;
+    }
+
+    .dosha-metric-card {
+        background: #FFFFFF;
+        border-radius: 12px;
+        padding: 1.2rem;
+        text-align: center;
+        border: 1px solid #E2E8F0;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.02);
+    }
+
+    .pill-symptom {
+        display: inline-block;
+        background: #F7FAFC;
+        border: 1px solid #E2E8F0;
+        border-radius: 20px;
+        padding: 4px 12px;
+        font-size: 0.85rem;
+        color: #4A5568;
+        margin: 3px;
+    }
+
+    .history-card {
+        background: #FFFFFF;
+        border-radius: 12px;
+        padding: 1.2rem 1.5rem;
+        border: 1px solid #E2E8F0;
+        margin-bottom: 1rem;
+        transition: all 0.2s ease;
+    }
+    .history-card:hover {
+        border-color: #CBD5E0;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+    }
+</style>
+"""

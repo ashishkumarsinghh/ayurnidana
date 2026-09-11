@@ -1,564 +1,1111 @@
-"""AyurNidana - Layman-Friendly Ayurvedic Health Assistant.
-Simple, intuitive interface designed for everyday patients to understand their body and heal systematically.
-"""
-import sys
-import os
+"""AyurNidana v3 — Phased, Intuitive, Beautiful.
 
-# Ensure the root project directory is in sys.path
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+UX Flow:
+  AUTH  →  INPUT (describe + 3 body checks)  →  RESULTS (scroll)
+                                                   └→ Ask AyurVaidya (inline)
+                                                   └→ Save / Download (inline)
+
+No tabs. No sidebar. No checkboxes. Just a guided conversation.
+"""
+
+import hashlib
+import json
+import os
+import sqlite3
+import hashlib as _hs
 
 import streamlit as st
-import pandas as pd
-import json
 
 from ayurnidana.core.models import (
-    PatientDemographics, AshtaSthanaPariksha, DashavidhaPariksha,
-    Gender, AgniType, KoshthaType, AmaStatus, Prognosis, PrakritiType, ClinicalCase
+    Gender, AmaStatus, AgniType, KoshthaType,
+    PatientDemographics, AshtaSthanaPariksha, DashavidhaPariksha, ClinicalCase
 )
 from ayurnidana.core.dosha_engine import DoshaEngine
-from ayurnidana.core.ashta_sthana import ASHTA_STHANA_CATALOG
-from ayurnidana.core.dashavidha import DASHAVIDHA_CRITERIA
 from ayurnidana.core.nidana_engine import NidanaEngine
 from ayurnidana.core.chikitsa_engine import ChikitsaEngine
-from ayurnidana.core.layman_mapper import extract_symptoms_from_text
-from ayurnidana.knowledge.notebook_bridge import NotebookBridge
+from ayurnidana.core.layman_mapper import (
+    get_symptom_label,
+    get_symptoms_by_category,
+    SYMPTOM_DEFINITIONS,
+    extract_symptoms_with_ai,
+)
 from ayurnidana.knowledge.local_library import LocalAyurvedaLibrary
 from ayurnidana.knowledge.ai_consultant import AIConsultant
 from ayurnidana.ui.components.style import CUSTOM_CSS
 from ayurnidana.ui.components.case_sheet import generate_markdown_case_sheet
 
-st.set_page_config(
-    page_title="AyurNidana - Personal Ayurvedic Health Guide",
-    page_icon="🌿",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+# ─────────────────────────────────────────────────────────────────
+# BODY CHECK OPTION MAPS
+# ─────────────────────────────────────────────────────────────────
 
-# Custom layman CSS tweaks
-st.markdown("""
-<style>
-    .patient-hero {
-        background: linear-gradient(135deg, #FBF8F3 0%, #F5EFEB 100%);
-        border-radius: 14px;
-        padding: 1.6rem 2rem;
-        border: 1px solid #EAD8C7;
-        margin-bottom: 1.5rem;
+TONGUE_OPTS = [
+    ("👅", "Clean & Pink",   "clean"),
+    ("🌫️", "White Coated", "white"),
+    ("🔴", "Red / Inflamed", "red"),
+    ("🏜️", "Dry & Cracked", "dry"),
+]
+STOOL_OPTS = [
+    ("✅", "Regular",         "normal"),
+    ("🪨", "Hard & Dry",     "hard"),
+    ("💧", "Loose / Watery", "loose"),
+    ("🟫", "Sticky & Heavy", "sticky"),
+]
+HUNGER_OPTS = [
+    ("⚖️", "Normal",          "normal"),
+    ("⚡", "Intense / Urgent","intense"),
+    ("🎲", "Irregular",       "irregular"),
+    ("😴", "Weak / Sluggish", "weak"),
+]
+
+TONGUE_STR = {
+    "clean": "Clean — healthy pink, no coating",
+    "white": "Thick white coating (Ama / Kapha)",
+    "red":   "Red, yellow, or inflamed (Pitta)",
+    "dry":   "Dry, rough, or cracked (Vata)",
+}
+STOOL_STR = {
+    "normal": "Normal, regular, easy to pass",
+    "hard":   "Hard, dry, pebble-like (Vata/constipation)",
+    "loose":  "Loose, watery, urgent (Pitta/Kapha)",
+    "sticky": "Sticky, heavy, foul-smelling (Ama)",
+}
+HUNGER_STR = {
+    "normal":    "Normal and steady",
+    "intense":   "Intense & sharp (get irritable if meal delayed)",
+    "irregular": "Irregular (sometimes starving, sometimes not hungry)",
+    "weak":      "Weak / sluggish — rarely feel hungry",
+}
+
+
+# ─────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────
+
+def _tag(category: str) -> str:
+    c = category.lower()
+    if "vati" in c or "guggulu" in c: return "tag-vati",   "Vati"
+    if "kwatha" in c or "kashaya" in c: return "tag-kwatha","Kwatha"
+    if "churna" in c:   return "tag-churna",  "Churna"
+    if "asava" in c or "arishta" in c: return "tag-asava", "Asava"
+    if "ghrita" in c or "ghee" in c:  return "tag-ghrita", "Ghrita"
+    if "taila" in c or "oil" in c:    return "tag-taila",  "Taila"
+    if "rasayana" in c: return "tag-rasayana","Rasayana"
+    return "tag-herbal", "Herbal"
+
+def _dosha_color(d: str) -> tuple:
+    """Returns (text_color, fill_color, bg_color) all high-contrast."""
+    return {
+        "Vata":  ("#1E3A8A", "#2563EB", "#DBEAFE"),
+        "Pitta": ("#7F1D1D", "#DC2626", "#FEE2E2"),
+        "Kapha": ("#14532D", "#16A34A", "#DCFCE7"),
+    }.get(d, ("#3D1F08", "#9C3B12", "#FEF6EF"))
+
+def _ama_html(ama) -> str:
+    if ama == AmaStatus.SAMA:
+        return "<span style='color:#991B1B;font-weight:700;'>⚠ High Ama — Toxin Load</span>"
+    if ama == AmaStatus.MILD_AMA:
+        return "<span style='color:#92400E;font-weight:700;'>〜 Mild Ama Present</span>"
+    return "<span style='color:#14532D;font-weight:700;'>✓ Nirama — Channels Clear</span>"
+
+def _agni_html(agni) -> str:
+    m = {
+        AgniType.MANDAGNI:   ("<span style='color:#991B1B;font-weight:700;'>Mandagni</span>", "Slow / Weak"),
+        AgniType.TIKSHNAGNI: ("<span style='color:#92400E;font-weight:700;'>Tikshnagni</span>", "Sharp / Hyper"),
+        AgniType.VISHAMAGNI: ("<span style='color:#581C87;font-weight:700;'>Vishamagni</span>", "Irregular"),
+        AgniType.SAMAGNI:    ("<span style='color:#14532D;font-weight:700;'>Samagni</span>", "Balanced ✓"),
     }
-    .question-box {
-        background: #FFFFFF;
-        border-radius: 10px;
-        padding: 1.2rem;
-        border: 1px solid #E2E8F0;
-        margin-bottom: 1rem;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.02);
-    }
-    .badge-plain {
-        padding: 6px 14px;
-        border-radius: 20px;
-        font-weight: 600;
-        font-size: 0.95rem;
-        display: inline-block;
-        margin-right: 8px;
-    }
-</style>
-""", unsafe_allow_html=True)
+    v, sub = m.get(agni, ("—", ""))
+    return v, sub
 
-# Initialize singletons in session state
-if "notebook_bridge" not in st.session_state:
-    st.session_state.notebook_bridge = NotebookBridge(target_notebook_name="ayurveda")
-if "library" not in st.session_state:
-    st.session_state.library = LocalAyurvedaLibrary()
-if "ai_consultant" not in st.session_state:
-    st.session_state.ai_consultant = AIConsultant()
-if "symptom_text_input" not in st.session_state:
-    st.session_state.symptom_text_input = ""
-if "active_symptoms" not in st.session_state:
-    st.session_state.active_symptoms = set(["joint_pain_cracking", "pain_sharp_throbbing", "tremors_stiffness", "dryness_skin_hair"])
+def _koshtha_html(k) -> tuple:
+    return {
+        KoshthaType.KRURA:   ("Krura",   "Constipation-prone"),
+        KoshthaType.MRIDU:   ("Mridu",   "Loose / Hyper-sensitive"),
+        KoshthaType.MADHYAMA:("Madhyama","Balanced ✓"),
+    }.get(k, ("—", ""))
 
-bridge = st.session_state.notebook_bridge
-auth_status = bridge.check_auth()
-lib = st.session_state.library
+def _body_check_row(label: str, options: list, key: str):
+    """Render tap-to-select body check options as styled button cards."""
+    st.markdown(f'<div class="an-label" style="margin-top:1.2rem;">{label}</div>', unsafe_allow_html=True)
+    current = st.session_state.get(key, options[0][2])
+    cols = st.columns(len(options))
+    for col, (icon, text, val) in zip(cols, options):
+        with col:
+            is_sel = current == val
+            t = "primary" if is_sel else "secondary"
+            if st.button(f"{icon} {text}", key=f"bc_{key}_{val}",
+                         use_container_width=True, type=t):
+                st.session_state[key] = val
+                st.rerun()
 
-# ----------------- SIDEBAR: SIMPLE OPTIONS -----------------
-with st.sidebar:
-    st.markdown("<h2 style='color:#8C4318; font-family:serif;'>🌿 AyurNidana</h2>", unsafe_allow_html=True)
-    st.caption("Your Personal Ayurvedic Health & Healing Companion")
-    st.markdown("---")
+def _sync_body_checks():
+    """Map body-check selections into the active_symptoms dict."""
+    sym = st.session_state.active_symptoms
+    tongue = st.session_state.get("tongue_val", "clean")
+    stool  = st.session_state.get("stool_val",  "normal")
+    hunger = st.session_state.get("hunger_val", "normal")
 
-    st.subheader("💡 Choose an Example Patient:")
-    example_choice = st.selectbox(
-        "Try an example or start fresh:",
-        [
-            "Custom Case (My Own Symptoms)",
-            "Example 1: Cracking Knee Pain, Stiff Joints & Dry Skin",
-            "Example 2: Severe Morning Joint Stiffness & Swelling (Toxins)",
-            "Example 3: Acid Reflux, Burning Stomach & Irritability",
-            "Example 4: Frequent Urination, Sweet Taste & Fatigue"
-        ]
+    # Tongue
+    for k in ["tongue_thick_white_coating", "tongue_dry_rough_cracked", "tongue_red_yellow_coating"]:
+        sym.pop(k, None)
+    if tongue == "white": sym["tongue_thick_white_coating"] = "constant"
+    elif tongue == "dry": sym["tongue_dry_rough_cracked"]   = "constant"
+    elif tongue == "red": sym["tongue_red_yellow_coating"]  = "constant"
+
+    # Stool
+    for k in ["constipation_hard_stools", "loose_stools_diarrhea", "malabsorption_mucus_stools"]:
+        sym.pop(k, None)
+    if stool == "hard":   sym["constipation_hard_stools"]   = "constant"
+    elif stool == "loose":sym["loose_stools_diarrhea"]       = "constant"
+    elif stool == "sticky":sym["malabsorption_mucus_stools"] = "constant"
+
+    # Hunger / appetite
+    for k in ["irregular_appetite", "intense_sharp_hunger", "loss_of_appetite"]:
+        sym.pop(k, None)
+    if hunger == "irregular": sym["irregular_appetite"]   = "constant"
+    elif hunger == "intense": sym["intense_sharp_hunger"] = "constant"
+    elif hunger == "weak":    sym["loss_of_appetite"]     = "constant"
+
+
+# ─────────────────────────────────────────────────────────────────
+# DATABASE (SQLite)
+# ─────────────────────────────────────────────────────────────────
+
+_DB_PATH = os.path.join(os.path.dirname(__file__), "../../..", "data", "ayurnidana.db")
+
+def _db():
+    os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        full_name TEXT,
+        age INTEGER DEFAULT 35,
+        gender TEXT DEFAULT 'Male',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS consultations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        chief_complaint TEXT,
+        symptoms TEXT,
+        primary_condition TEXT,
+        sanskrit_name TEXT,
+        dosha_scores TEXT,
+        treatment_summary TEXT,
+        case_sheet_md TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.commit()
+    return conn
+
+def authenticate_user(identity: str, password: str):
+    try:
+        ph = _hs.sha256(password.encode()).hexdigest()
+        conn = _db()
+        row = conn.execute(
+            "SELECT * FROM users WHERE (username=? OR email=?) AND password_hash=?",
+            (identity, identity, ph)
+        ).fetchone()
+        conn.close()
+        if row: return True, "OK", dict(row)
+        return False, "Incorrect username or password.", None
+    except Exception as e:
+        return False, f"Error: {e}", None
+
+def register_user(username, email, password, full_name, age, gender):
+    try:
+        ph = _hs.sha256(password.encode()).hexdigest()
+        conn = _db()
+        conn.execute(
+            "INSERT INTO users (username,email,password_hash,full_name,age,gender) VALUES (?,?,?,?,?,?)",
+            (username, email, ph, full_name, age, gender)
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+        conn.close()
+        return True, "Account created!", dict(row)
+    except sqlite3.IntegrityError:
+        return False, "Username or email already in use.", None
+    except Exception as e:
+        return False, f"Error: {e}", None
+
+def save_consultation(user_id, chief_complaint, symptoms, primary_condition,
+                      sanskrit_name, dosha_scores, treatment_summary, case_sheet_md):
+    try:
+        conn = _db()
+        conn.execute(
+            """INSERT INTO consultations
+               (user_id,chief_complaint,symptoms,primary_condition,sanskrit_name,
+                dosha_scores,treatment_summary,case_sheet_md)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (user_id, chief_complaint, json.dumps(symptoms), primary_condition,
+             sanskrit_name, json.dumps(dosha_scores), treatment_summary, case_sheet_md)
+        )
+        conn.commit()
+        cid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.close()
+        return cid
+    except Exception:
+        return None
+
+def get_user_consultations(user_id):
+    try:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT * FROM consultations WHERE user_id=? ORDER BY created_at DESC",
+            (user_id,)
+        ).fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["symptoms"]     = json.loads(d.get("symptoms") or "[]")
+            d["dosha_scores"] = json.loads(d.get("dosha_scores") or "{}")
+            result.append(d)
+        return result
+    except Exception:
+        return []
+
+
+# ─────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────
+
+def main():
+    st.set_page_config(
+        page_title="AyurNidana — Your Ayurvedic Health Guide",
+        page_icon="🌿",
+        layout="centered",
+        initial_sidebar_state="collapsed",
     )
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.subheader("📓 My Ayurveda Notebook")
-    if auth_status["authenticated"]:
-        st.success("✅ Connected to Google NotebookLM")
-        conn_res = bridge.connect_to_ayurveda_notebook()
-        if conn_res["connected"]:
-            st.caption(f"Linked: **{conn_res['title']}**")
+    # ── Session defaults ────────────────────────────────────────
+    defaults = dict(
+        user=None, is_guest=False,
+        view="input",          # "input" | "results" | "history"
+        active_symptoms={},
+        user_story="",
+        tongue_val="clean", stool_val="normal", hunger_val="normal",
+        last_q_response="",
+        _diag_cache_key="",
+    )
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+    if isinstance(st.session_state.active_symptoms, (set, list)):
+        st.session_state.active_symptoms = {s: "constant" for s in st.session_state.active_symptoms}
+
+    if "ai_consultant" not in st.session_state:
+        st.session_state.ai_consultant = AIConsultant()
+    ai: AIConsultant = st.session_state.ai_consultant
+
+    # ── Auth gate ────────────────────────────────────────────────
+    if not st.session_state.user and not st.session_state.is_guest:
+        _render_auth()
+        return
+
+    # ── User vars ────────────────────────────────────────────────
+    user      = st.session_state.user
+    is_guest  = st.session_state.is_guest
+    user_id   = user.get("id", 0)
+
+    if "patient_name"   not in st.session_state: st.session_state.patient_name   = user.get("full_name","Patient")
+    if "patient_age"    not in st.session_state: st.session_state.patient_age    = int(user.get("age",35))
+    if "patient_gender" not in st.session_state: st.session_state.patient_gender = user.get("gender","Male")
+
+    name   = st.session_state.patient_name
+    age    = int(st.session_state.patient_age)
+    gender = Gender.FEMALE if st.session_state.patient_gender == "Female" else Gender.MALE
+    vaya   = "Bala" if age < 16 else ("Madhyama" if age <= 60 else "Vriddha")
+
+    # ── Render ───────────────────────────────────────────────────
+    _render_topbar(name, is_guest, user_id)
+
+    if st.session_state.view == "history":
+        _render_history(user_id, is_guest)
+    elif st.session_state.view == "results":
+        _render_results(name, age, gender, vaya, is_guest, user_id, ai)
     else:
-        st.info("ℹ️ NotebookLM: Not signed in yet")
-        if st.button("🔑 Sign in with Google"):
-            import subprocess
-            try:
-                subprocess.Popen(["cmd.exe", "/c", "start", "powershell", "-NoExit", "-Command", "python -m notebooklm login"])
-                st.info("Google sign-in window launched on your screen! Complete login, then click refresh.")
-            except Exception as e:
-                st.error(f"Error: {e}")
-        if st.button("🔄 Refresh Status"):
+        _render_input(ai)
+
+
+# ─────────────────────────────────────────────────────────────────
+# AUTH
+# ─────────────────────────────────────────────────────────────────
+
+def _render_auth():
+    _, col, _ = st.columns([0.5, 3, 0.5])
+    with col:
+        st.markdown("""
+        <div class="an-auth-logo">
+            <div class="icon">🌿</div>
+            <h2>AyurNidana</h2>
+            <p>Your personal Ayurvedic diagnostic companion.<br>
+               Ancient wisdom, personalized to you.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        tab_in, tab_reg = st.tabs(["Sign In", "Create Account"])
+
+        with tab_in:
+            ident = st.text_input("Username or Email", placeholder="you@example.com", key="li_id")
+            pwd   = st.text_input("Password", type="password", key="li_pwd")
+            if st.button("Sign In →", type="primary", use_container_width=True, key="btn_li"):
+                if ident and pwd:
+                    ok, msg, ud = authenticate_user(ident, pwd)
+                    if ok:
+                        st.session_state.user = ud
+                        st.session_state.patient_name   = ud.get("full_name","Patient")
+                        st.session_state.patient_age    = ud.get("age",35)
+                        st.session_state.patient_gender = ud.get("gender","Male")
+                        st.rerun()
+                    else:
+                        st.error(msg)
+                else:
+                    st.warning("Fill in both fields.")
+
+        with tab_reg:
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                rn = st.text_input("Full Name", key="rn", placeholder="Ananya Sharma")
+                ru = st.text_input("Username",  key="ru", placeholder="ananya")
+                ra = st.number_input("Age", 1, 110, 30, key="ra")
+            with rc2:
+                re = st.text_input("Email",    key="re", placeholder="you@example.com")
+                rp = st.text_input("Password", key="rp", type="password")
+                rg = st.selectbox("Gender", ["Male","Female","Other"], key="rg")
+            if st.button("Create Account →", type="primary", use_container_width=True, key="btn_reg"):
+                if rn and ru and re and rp:
+                    ok, msg, ud = register_user(ru, re, rp, rn, ra, rg)
+                    if ok:
+                        st.session_state.user = ud
+                        st.session_state.patient_name   = rn
+                        st.session_state.patient_age    = ra
+                        st.session_state.patient_gender = rg
+                        st.rerun()
+                    else:
+                        st.error(msg)
+                else:
+                    st.warning("Please fill all fields.")
+
+        st.markdown("<div style='text-align:center;margin:1rem 0 0.5rem;color:#6B4C30;font-size:0.85rem;'>or</div>",
+                    unsafe_allow_html=True)
+        if st.button("Continue as Guest →", use_container_width=True, key="btn_guest"):
+            st.session_state.is_guest = True
+            st.session_state.user = {
+                "id":0,"username":"guest","email":"","full_name":"Guest","age":35,"gender":"Male"
+            }
+            st.session_state.patient_name   = "Guest"
+            st.session_state.patient_age    = 35
+            st.session_state.patient_gender = "Male"
             st.rerun()
+        st.caption("Guest sessions are not saved. Create a free account to keep your health history.")
 
-    st.markdown("---")
-    lib_stat = lib.get_library_status()
-    st.caption(f"📚 {lib_stat.get('total_treatises', 138)} Classical Books & Treatises Linked")
 
-# ----------------- PRESET DATA HANDLING -----------------
-default_name = "Alex"
-default_age = 45
-default_gender = Gender.MALE
-default_story = "My knees make clicking sounds when I climb stairs, and they ache a lot in cold weather. My skin is always dry and I get bloated easily."
+# ─────────────────────────────────────────────────────────────────
+# TOP BAR
+# ─────────────────────────────────────────────────────────────────
 
-if "Example 1" in example_choice:
-    default_name = "Rajesh"
-    default_age = 54
-    default_gender = Gender.MALE
-    default_story = "My right knee has sharp clicking sounds and pain when I walk. It feels stiff in the morning and hurts more when it's cold. My skin is dry and I get constipated."
-    st.session_state.active_symptoms = set(["joint_pain_cracking", "pain_sharp_throbbing", "tremors_stiffness", "dryness_skin_hair", "constipation_hard_stools"])
-elif "Example 2" in example_choice:
-    default_name = "Sunita"
-    default_age = 42
-    default_gender = Gender.FEMALE
-    default_story = "My finger and wrist joints are swollen and very painful. Every morning I wake up completely stiff for over an hour. My tongue has a thick white coating and I feel heavy and feverish."
-    st.session_state.active_symptoms = set(["joint_pain_cracking", "dull_pain_swelling_edema", "heaviness_body_limbs", "fever", "tongue_thick_white_coating", "loss_of_taste_aruchi"])
-elif "Example 3" in example_choice:
-    default_name = "Amit"
-    default_age = 36
-    default_gender = Gender.MALE
-    default_story = "I get severe burning in my chest and throat after eating, especially with spicy food. I have sour burps, my stomach burns, and I feel hot and easily irritated."
-    st.session_state.active_symptoms = set(["burning_sensation", "acid_reflux_heartburn", "intense_sharp_hunger", "yellowish_eyes_urine", "irritability_anger"])
-elif "Example 4" in example_choice:
-    default_name = "Vikram"
-    default_age = 50
-    default_gender = Gender.MALE
-    default_story = "I need to pee very often especially at night. My mouth tastes sweet, I am constantly thirsty, and I feel tired and heavy with weight gain."
-    st.session_state.active_symptoms = set(["excessive_thirst_sweating", "heaviness_body_limbs", "weight_gain_slow_metabolism", "tongue_thick_white_coating", "burning_sensation"])
-
-# ----------------- HERO BANNER -----------------
-st.markdown("""
-<div class='patient-hero'>
-    <h2 style='margin:0 0 8px 0; color:#7C2D12; font-family:serif;'>🌿 Welcome to AyurNidana</h2>
-    <p style='margin:0; font-size:1.1rem; color:#431407; line-height:1.5;'>
-        No medical jargon needed. Tell us what you're feeling in everyday words, or check off your symptoms below. 
-        We will analyze your body's energy balance, explain what is causing your discomfort, and create a tailored Ayurvedic healing and diet plan.
-    </p>
-</div>
-""", unsafe_allow_html=True)
-
-# Tabs
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "💬 1. Tell Us How You Feel",
-    "🔍 2. What Is Happening In Your Body?",
-    "💊 3. Your Healing & Diet Plan",
-    "❓ 4. Ask Any Question",
-    "📄 5. Save My Health Plan"
-])
-
-# ----------------- TAB 1: HOW YOU FEEL -----------------
-with tab1:
-    st.markdown("### Step 1: Tell Us About Yourself")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        patient_name = st.text_input("Your Name / Nickname:", value=default_name)
-    with col2:
-        patient_age = st.number_input("Your Age:", min_value=5, max_value=105, value=default_age)
-    with col3:
-        patient_gender = st.selectbox("Gender:", [Gender.MALE, Gender.FEMALE, Gender.OTHER], index=0 if default_gender == Gender.MALE else 1)
-
-    st.markdown("---")
-    st.markdown("### Step 2: Describe What You Are Feeling (In Your Own Words)")
-    st.caption("You can type naturally, e.g., 'My knees hurt and click when walking, I feel gassy after dinner, and I can't sleep.'")
-    
-    user_story = st.text_area("Your Health Story / What hurts or bothers you?", value=default_story, height=80)
-    
-    if st.button("✨ Auto-Detect Symptoms From My Story"):
-        found = extract_symptoms_from_text(user_story)
-        if found:
-            st.session_state.active_symptoms = set(found)
-            st.success(f"Recognized {len(found)} symptom markers from your description! Look at the checklist below to adjust.")
-        else:
-            st.info("We couldn't detect specific symptoms automatically. Please check the boxes below!")
-
-    st.markdown("---")
-    st.markdown("### Step 3: Quick Everyday Health Checklist (Tick what applies)")
-    
-    scol1, scol2 = st.columns(2)
-    with scol1:
-        st.markdown("<div class='question-box'><h4>🍽️ Digestion & Stomach</h4>", unsafe_allow_html=True)
-        c_acid = st.checkbox("Acid reflux, heartburn, or sour liquid rising in throat", value="acid_reflux_heartburn" in st.session_state.active_symptoms)
-        c_bloat = st.checkbox("Belly feels bloated, swollen with gas, or distended", value="bloating_flatulence" in st.session_state.active_symptoms)
-        c_const = st.checkbox("Hard, dry stools or trouble having a daily bowel movement", value="constipation_hard_stools" in st.session_state.active_symptoms)
-        c_loose = st.checkbox("Loose, burning stools or frequent diarrhea", value="loose_stools_diarrhea" in st.session_state.active_symptoms)
-        c_loss_app = st.checkbox("No appetite at all / food has no taste", value="loss_of_taste_aruchi" in st.session_state.active_symptoms)
-        c_heavy = st.checkbox("Feeling very heavy, sluggish, or like food sits in stomach for hours", value="heaviness_body_limbs" in st.session_state.active_symptoms)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        st.markdown("<div class='question-box'><h4>🦴 Joints, Muscles & Pain</h4>", unsafe_allow_html=True)
-        c_joint = st.checkbox("Joints hurt, feel stiff, or make cracking/clicking sounds", value="joint_pain_cracking" in st.session_state.active_symptoms)
-        c_sharp = st.checkbox("Sharp, shooting, or throbbing pain", value="pain_sharp_throbbing" in st.session_state.active_symptoms)
-        c_stiff = st.checkbox("Body feels locked or stiff in the morning when waking up", value="tremors_stiffness" in st.session_state.active_symptoms)
-        c_swell = st.checkbox("Joints are swollen, puffy, or warm to touch", value="dull_pain_swelling_edema" in st.session_state.active_symptoms)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with scol2:
-        st.markdown("<div class='question-box'><h4>😴 Sleep, Energy & Mood</h4>", unsafe_allow_html=True)
-        c_sleep = st.checkbox("Trouble falling asleep, waking up frequently, or racing thoughts at night", value="insomnia_disturbed_sleep" in st.session_state.active_symptoms)
-        c_anx = st.checkbox("Feeling restless, anxious, nervous, or easily worried", value="anxiety_restlessness" in st.session_state.active_symptoms)
-        c_anger = st.checkbox("Feeling irritable, impatient, hot-tempered, or stressed", value="irritability_anger" in st.session_state.active_symptoms)
-        c_fatigue = st.checkbox("Constant fatigue / wanting to sleep during the day", value="weight_gain_slow_metabolism" in st.session_state.active_symptoms)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        st.markdown("<div class='question-box'><h4>🌡️ Body Sensation & Skin</h4>", unsafe_allow_html=True)
-        c_dry = st.checkbox("Skin, lips, or hair feel noticeably dry, rough, or flaky", value="dryness_skin_hair" in st.session_state.active_symptoms)
-        c_burn = st.checkbox("Burning sensation in palms, soles, or entire body", value="burning_sensation" in st.session_state.active_symptoms)
-        c_rash = st.checkbox("Skin rashes, redness, pimples, or acne breakouts", value="skin_rashes_inflammation_acne" in st.session_state.active_symptoms)
-        c_fever = st.checkbox("Feverish feeling, mild fever, or body chills", value="fever" in st.session_state.active_symptoms)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown("---")
-    st.markdown("### Step 4: Simple Mirror & Body Checks")
-    
-    bcol1, bcol2, bcol3 = st.columns(3)
-    with bcol1:
-        st.markdown("**👅 What does your tongue look like in the mirror?**")
-        tongue_choice = st.radio(
-            "Select tongue appearance:",
-            [
-                "Clean, pink, moist, and healthy",
-                "Thick white coating all over (sign of body toxins)",
-                "Dry, rough, or has lines/cracks",
-                "Reddish with yellowish/brown coating"
-            ],
-            index=1 if "thick_white" in " ".join(st.session_state.active_symptoms) else (2 if "cracking" in " ".join(st.session_state.active_symptoms) else 0)
-        )
-
-    with bcol2:
-        st.markdown("**🚽 What are your bowel movements like?**")
-        stool_choice = st.radio(
-            "Select bowel quality:",
-            [
-                "Normal, regular, easy to pass without straining",
-                "Hard, dry, dark pebbles, or constipated",
-                "Loose, watery, urgent, or with burning feeling",
-                "Sticky, heavy, foul-smelling, or sinks in water"
-            ],
-            index=1 if "constipation" in " ".join(st.session_state.active_symptoms) else (2 if "loose" in " ".join(st.session_state.active_symptoms) else (3 if "thick_white" in " ".join(st.session_state.active_symptoms) else 0))
-        )
-
-    with bcol3:
-        st.markdown("**🔥 How is your appetite & hunger?**")
-        hunger_choice = st.radio(
-            "Select hunger level:",
-            [
-                "Normal and steady (hungry around meal times)",
-                "Irregular (sometimes starving, sometimes forgetting to eat)",
-                "Intense & sharp (get angry or weak if meal is delayed)",
-                "Weak / sluggish (rarely feel genuinely hungry)"
-            ],
-            index=1 if "dryness" in " ".join(st.session_state.active_symptoms) else (2 if "acid" in " ".join(st.session_state.active_symptoms) else 0)
-        )
-
-# Collect selected symptoms
-current_selected = []
-if c_acid: current_selected.append("acid_reflux_heartburn")
-if c_bloat: current_selected.append("bloating_flatulence")
-if c_const: current_selected.append("constipation_hard_stools")
-if c_loose: current_selected.append("loose_stools_diarrhea")
-if c_loss_app: current_selected.append("loss_of_taste_aruchi")
-if c_heavy: current_selected.append("heaviness_body_limbs")
-if c_joint: current_selected.append("joint_pain_cracking")
-if c_sharp: current_selected.append("pain_sharp_throbbing")
-if c_stiff: current_selected.append("tremors_stiffness")
-if c_swell: current_selected.append("dull_pain_swelling_edema")
-if c_sleep: current_selected.append("insomnia_disturbed_sleep")
-if c_anx: current_selected.append("anxiety_restlessness")
-if c_anger: current_selected.append("irritability_anger")
-if c_fatigue: current_selected.append("weight_gain_slow_metabolism")
-if c_dry: current_selected.append("dryness_skin_hair")
-if c_burn: current_selected.append("burning_sensation")
-if c_rash: current_selected.append("skin_rashes_inflammation_acne")
-if c_fever: current_selected.append("fever")
-if "white coating" in tongue_choice: current_selected.append("tongue_thick_white_coating")
-
-if not current_selected:
-    current_selected = ["joint_pain_cracking", "dryness_skin_hair"]
-
-# Run engines
-dosha_pct, vikriti_pattern = DoshaEngine.calculate_vikriti(current_selected)
-ama_status, ama_reasons = DoshaEngine.assess_ama(current_selected, tongue_choice)
-dhatus, srotas = DoshaEngine.determine_dhatu_and_srotas(current_selected)
-
-if "sharp" in hunger_choice.lower() or c_acid or c_burn:
-    agni_status = AgniType.TIKSHNAGNI
-elif "weak" in hunger_choice.lower() or ama_status == AmaStatus.SAMA:
-    agni_status = AgniType.MANDAGNI
-elif "irregular" in hunger_choice.lower():
-    agni_status = AgniType.VISHAMAGNI
-else:
-    agni_status = AgniType.SAMAGNI
-
-if "hard" in stool_choice.lower() or c_const:
-    koshtha_status = KoshthaType.KRURA
-elif "loose" in stool_choice.lower() or c_loose:
-    koshtha_status = KoshthaType.MRIDU
-else:
-    koshtha_status = KoshthaType.MADHYAMA
-
-diagnosis_result = NidanaEngine.diagnose(
-    symptoms=current_selected,
-    vikriti_pattern=vikriti_pattern,
-    ama_status=ama_status,
-    agni_status=agni_status,
-    koshtha_status=koshtha_status,
-    dhatu_involved=dhatus,
-    srotas_involved=srotas
-)
-
-dashavidha_mock = DashavidhaPariksha(
-    prakriti="Vata-Pitta",
-    vikriti=vikriti_pattern,
-    sara_tissue_excellence="Madhyama",
-    samhanana_compactness="Madhyama",
-    sattva_mental_strength="Madhyama",
-    ahara_shakti_digestive_power=hunger_choice,
-    vyayama_shakti_physical_stamina="Madhyama",
-    vaya_age_stage="Madhyamavastha"
-)
-
-treatment_plan = ChikitsaEngine.generate_plan(
-    diagnosis=diagnosis_result,
-    dashavidha=dashavidha_mock,
-    patient_age=patient_age,
-    season="Current Season"
-)
-
-# ----------------- TAB 2: DIAGNOSIS (LAYMAN EXPLANATION) -----------------
-with tab2:
-    st.markdown("## 🔍 What Is Happening In Your Body?")
-    st.markdown("In Ayurveda, your body is powered by three vital energies (Doshas): **Air & Movement (Vata)**, **Fire & Digestion (Pitta)**, and **Water & Structure (Kapha)**. When one gets too high, discomfort begins.")
-
-    v_val = dosha_pct.get("Vata", 33)
-    p_val = dosha_pct.get("Pitta", 33)
-    k_val = dosha_pct.get("Kapha", 33)
-
-    st.markdown("### Your Body's Energy Balance Right Now:")
-    mcol1, mcol2, mcol3 = st.columns(3)
-    with mcol1:
+def _render_topbar(name: str, is_guest: bool, user_id: int):
+    c1, c2, c3 = st.columns([2, 3, 2])
+    with c1:
+        st.markdown("<div style='padding-top:4px;font-family:Lora,serif;font-size:1.15rem;font-weight:600;color:#5C2D0A;'>🌿 AyurNidana</div>",
+                    unsafe_allow_html=True)
+    with c2:
+        # Step dots
+        view = st.session_state.view
+        step1 = "done"   if view in ("results","history") else "active"
+        step2 = "active" if view == "results" else ("done" if view == "history" else "")
+        step3 = "active" if view == "history" else ""
         st.markdown(f"""
-        <div class='question-box' style='border-top: 4px solid #3182CE;'>
-            <h4 style='color:#2B6CB0; margin:0;'>💨 Air & Movement Energy (Vata)</h4>
-            <h2 style='margin:4px 0; color:#1A365D;'>{v_val}%</h2>
-            <p style='color:#4A5568; font-size:0.9rem;'>Controls joints, nerves, flexibility, and dryness.</p>
+        <div class="an-steps" style="padding-top:6px;">
+            <div class="an-step-dot {step1}" title="Describe"></div>
+            <div style="height:1px;width:18px;background:#C9B59A;"></div>
+            <div class="an-step-dot {step2}" title="Results"></div>
+            <div style="height:1px;width:18px;background:#C9B59A;"></div>
+            <div class="an-step-dot {step3}" title="History"></div>
         </div>
         """, unsafe_allow_html=True)
-    with mcol2:
-        st.markdown(f"""
-        <div class='question-box' style='border-top: 4px solid #DD6B20;'>
-            <h4 style='color:#C05621; margin:0;'>🔥 Fire & Heat Energy (Pitta)</h4>
-            <h2 style='margin:4px 0; color:#7B341E;'>{p_val}%</h2>
-            <p style='color:#4A5568; font-size:0.9rem;'>Controls digestion, acidity, skin heat, and metabolism.</p>
-        </div>
-        """, unsafe_allow_html=True)
-    with mcol3:
-        st.markdown(f"""
-        <div class='question-box' style='border-top: 4px solid #38A169;'>
-            <h4 style='color:#276749; margin:0;'>🌊 Earth & Fluid Energy (Kapha)</h4>
-            <h2 style='margin:4px 0; color:#22543D;'>{k_val}%</h2>
-            <p style='color:#4A5568; font-size:0.9rem;'>Controls joint lubrication, mucus, stability, and weight.</p>
-        </div>
-        """, unsafe_allow_html=True)
+    with c3:
+        mc1, mc2 = st.columns(2)
+        with mc1:
+            if view != "history":
+                if st.button("📑", use_container_width=True, help="History"):
+                    st.session_state.view = "history"
+                    st.rerun()
+            else:
+                if st.button("🏠", use_container_width=True, help="Home"):
+                    st.session_state.view = "input"
+                    st.rerun()
+        with mc2:
+            if is_guest:
+                if st.button("Login", use_container_width=True):
+                    st.session_state.user = None
+                    st.session_state.is_guest = False
+                    st.rerun()
+            else:
+                if st.button("Exit", use_container_width=True, help=f"Sign out ({name})"):
+                    for k in ["user","is_guest","active_symptoms","user_story",
+                              "_diag_cache_key","diagnosis_result","treatment_plan"]:
+                        st.session_state.pop(k, None)
+                    st.session_state.is_guest = False
+                    st.rerun()
 
-    st.markdown("---")
+    st.markdown("<hr style='margin:0.8rem 0 1.4rem;'>", unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────
+# INPUT VIEW
+# ─────────────────────────────────────────────────────────────────
+
+def _render_input(ai: AIConsultant):
+    name = st.session_state.patient_name
+
     st.markdown(f"""
-    <div class='ayur-card-gold'>
-        <h3 style='color:#92400E; margin:0;'>🎯 Summary of What You Are Experiencing:</h3>
-        <h2 style='color:#78350F; margin:4px 0 10px 0;'>{diagnosis_result.primary_condition}</h2>
-        <p style='font-size:1.05rem; color:#451A03; line-height:1.6;'>
-            Based on your answers, your primary issue is caused by <strong>{vikriti_pattern}</strong>. 
-            When this happens, your body experiences excess dryness, friction, or heat in the affected areas.
-        </p>
+    <div class="an-page-title">How are you feeling, {name.split()[0]}?</div>
+    <div class="an-page-sub">
+        Describe what's bothering you in your own words — a few sentences is enough.
+        We'll identify your symptoms, check your body signals, and build a personalized Ayurvedic healing plan.
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("### 🧽 Internal Toxin Level (Ama):")
-    if ama_status == AmaStatus.SAMA:
-        st.warning("⚠️ **High Buildup of Undigested Toxins (Ama)**: Your digestive fire has been weak, leaving behind sticky metabolic waste. This causes heavy morning stiffness, coated tongue, and fatigue. Our first step is a gentle detox.")
-    elif ama_status == AmaStatus.MILD_AMA:
-        st.info("ℹ️ **Mild Toxin Buildup**: Some minor digestive sluggishness is present. Gentle digestive spices like ginger will clear this up quickly.")
+    # ── Story textarea ──────────────────────────────────────────
+    story = st.text_area(
+        "What's troubling you?",
+        value=st.session_state.user_story,
+        placeholder=(
+            "e.g. I've had bloating and gas after every meal for the past 2 weeks. "
+            "I also get headaches in the morning and feel tired despite sleeping 8 hours..."
+        ),
+        height=120,
+        label_visibility="collapsed",
+        key="story_ta"
+    )
+    st.session_state.user_story = story
+
+    # ── Active symptoms chips ───────────────────────────────────
+    sym = st.session_state.active_symptoms
+    if sym:
+        st.markdown("<div style='margin:0.6rem 0 0.2rem;'>", unsafe_allow_html=True)
+        chips_html = ""
+        for sid, freq in sym.items():
+            label = get_symptom_label(sid)
+            cls = "sym-chip" if freq == "constant" else "sym-chip-mild"
+            dot = "🔴" if freq == "constant" else "🟡"
+            chips_html += f"<span class='{cls}'>{dot} {label}</span>"
+        st.markdown(chips_html, unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── Search & add specific symptoms ─────────────────────────
+    with st.expander("＋ Add or remove specific symptoms", expanded=False):
+        all_opts = {sid: f"{data['label']}" + (" ✓" if sid in sym else "")
+                    for sid, data in SYMPTOM_DEFINITIONS.items()}
+        sc1, sc2, sc3 = st.columns([3, 1.5, 1])
+        with sc1:
+            chosen = st.selectbox("Search symptoms", ["— select —"] + list(all_opts.keys()),
+                                  format_func=lambda x: all_opts.get(x, x),
+                                  key="sym_search", label_visibility="collapsed")
+        with sc2:
+            freq_opt = st.selectbox("Frequency", ["Mild / Sometimes", "Severe / Constant"],
+                                    key="sym_freq", label_visibility="collapsed")
+        with sc3:
+            is_upd = chosen in sym
+            if st.button("Update" if is_upd else "Add", use_container_width=True,
+                         type="primary", key="btn_add"):
+                if chosen and chosen != "— select —":
+                    fv = "sometimes" if "Mild" in freq_opt else "constant"
+                    sym[chosen] = fv
+                    st.toast(f"✅ {SYMPTOM_DEFINITIONS[chosen]['label']}")
+                    st.rerun()
+
+        # Remove chips
+        if sym:
+            st.markdown("<div style='margin-top:0.8rem;'>", unsafe_allow_html=True)
+            remove_cols = st.columns(3)
+            items = list(sym.items())
+            for i, (sid, freq) in enumerate(items):
+                with remove_cols[i % 3]:
+                    dot = "🔴" if freq == "constant" else "🟡"
+                    if st.button(f"{dot} {get_symptom_label(sid)}", key=f"rm_{sid}",
+                                 use_container_width=True):
+                        sym.pop(sid, None)
+                        st.rerun()
+            st.caption("Click a symptom above to remove it.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+
+    # ── Body checks ─────────────────────────────────────────────
+    st.markdown('<div class="an-label">3 Quick Body Checks</div>', unsafe_allow_html=True)
+    st.markdown("<div style='font-size:0.88rem;color:#6B4C30;margin-bottom:0.8rem;'>Tap to select — these take 10 seconds and greatly improve accuracy.</div>",
+                unsafe_allow_html=True)
+
+    _body_check_row("👅 How does your tongue look?", TONGUE_OPTS, "tongue_val")
+    _body_check_row("🚽 How are your bowel movements?", STOOL_OPTS, "stool_val")
+    _body_check_row("🍽️ How is your appetite?", HUNGER_OPTS, "hunger_val")
+
+    st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+
+    # ── Profile (collapsible, not required) ─────────────────────
+    with st.expander("👤 Patient details (name, age, gender)", expanded=False):
+        pc1, pc2, pc3 = st.columns(3)
+        with pc1:
+            nn = st.text_input("Name", value=st.session_state.patient_name, key="pn")
+            if nn != st.session_state.patient_name:
+                st.session_state.patient_name = nn
+        with pc2:
+            na = st.number_input("Age", 1, 115, value=st.session_state.patient_age, step=1, key="pa")
+            if na != st.session_state.patient_age:
+                st.session_state.patient_age = int(na)
+        with pc3:
+            gi = ["Male","Female","Other"].index(st.session_state.patient_gender)
+            ng = st.selectbox("Gender", ["Male","Female","Other"], index=gi, key="pg")
+            if ng != st.session_state.patient_gender:
+                st.session_state.patient_gender = ng
+
+    st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+
+    # ── CTA ─────────────────────────────────────────────────────
+    btn_cols = st.columns([1, 2, 1])
+    with btn_cols[1]:
+        clicked = st.button(
+            "✨ Get My Healing Plan",
+            type="primary",
+            use_container_width=True,
+            key="btn_analyze"
+        )
+
+    if clicked:
+        if not story.strip() and not sym:
+            st.warning("Please describe how you're feeling, or select at least one symptom.")
+        else:
+            with st.spinner("Analyzing your symptoms..."):
+                if story.strip():
+                    found = extract_symptoms_with_ai(story, ai)
+                    for k, v in found.items():
+                        if k not in sym:
+                            sym[k] = v
+            _sync_body_checks()
+            st.session_state.active_symptoms = sym
+            st.session_state.view = "results"
+            st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────
+# RESULTS VIEW
+# ─────────────────────────────────────────────────────────────────
+
+def _render_results(name: str, age: int, gender: Gender, vaya: str,
+                    is_guest: bool, user_id: int, ai: AIConsultant):
+
+    sym = dict(st.session_state.active_symptoms)
+    tongue_val = st.session_state.get("tongue_val", "clean")
+    stool_val  = st.session_state.get("stool_val",  "normal")
+    hunger_val = st.session_state.get("hunger_val", "normal")
+
+    tongue_str = TONGUE_STR.get(tongue_val, "")
+    stool_str  = STOOL_STR.get(stool_val, "")
+    hunger_str = HUNGER_STR.get(hunger_val, "")
+
+    if not sym:
+        st.markdown("""<div class="an-empty">
+            <div class="ei">🌿</div><h3>No symptoms found</h3>
+            <p>Go back and describe how you're feeling, or select your body check options.</p>
+        </div>""", unsafe_allow_html=True)
+        if st.button("← Describe Again", type="primary"):
+            st.session_state.view = "input"
+            st.rerun()
+        return
+
+    # Back button (inline, unobtrusive)
+    bc, _, rc = st.columns([1.5, 3, 1.5])
+    with bc:
+        if st.button("← Describe Again"):
+            st.session_state.view = "input"
+            st.rerun()
+    with rc:
+        sym_count = len(sym)
+        st.markdown(f"<div style='text-align:right;font-size:0.83rem;color:#6B4C30;padding-top:6px;'>{sym_count} symptoms tracked</div>",
+                    unsafe_allow_html=True)
+
+    # ── Compute diagnostics (cached) ────────────────────────────
+    _cache_key = hashlib.md5(
+        (str(sorted(sym.items())) + tongue_str + stool_str + hunger_str + str(age)).encode()
+    ).hexdigest()
+
+    if st.session_state.get("_diag_cache_key") != _cache_key or "diagnosis_result" not in st.session_state:
+        dosha_pct, vikriti = DoshaEngine.calculate_vikriti(sym)
+        ama_status, ama_reasons = DoshaEngine.assess_ama(sym, tongue_str)
+        dhatus, srotas = DoshaEngine.determine_dhatu_and_srotas(sym)
+
+        if "sharp" in hunger_str.lower() or "intense" in hunger_str.lower():
+            agni = AgniType.TIKSHNAGNI
+        elif "weak" in hunger_str.lower() or ama_status == AmaStatus.SAMA:
+            agni = AgniType.MANDAGNI
+        elif "irregular" in hunger_str.lower():
+            agni = AgniType.VISHAMAGNI
+        else:
+            agni = AgniType.SAMAGNI
+
+        if "hard" in stool_str.lower():   koshtha = KoshthaType.KRURA
+        elif "loose" in stool_str.lower(): koshtha = KoshthaType.MRIDU
+        else:                              koshtha = KoshthaType.MADHYAMA
+
+        dx = NidanaEngine.diagnose(
+            symptoms=sym, vikriti_pattern=vikriti,
+            ama_status=ama_status, agni_status=agni, koshtha_status=koshtha,
+            dhatu_involved=dhatus, srotas_involved=srotas
+        )
+        dasha = DashavidhaPariksha(
+            prakriti=vikriti.split("(")[0].strip(),
+            vikriti=vikriti,
+            sara_tissue_excellence="Madhyama",
+            samhanana_compactness="Madhyama",
+            sattva_mental_strength="Madhyama",
+            ahara_shakti_digestive_power=hunger_str,
+            vyayama_shakti_physical_stamina="Madhyama",
+            vaya_age_stage="Madhyamavastha" if age < 60 else "Vriddhavastha"
+        )
+        tx = ChikitsaEngine.generate_plan(diagnosis=dx, dashavidha=dasha, patient_age=age, season="Current Season")
+
+        st.session_state.update(dict(
+            _diag_cache_key=_cache_key,
+            diagnosis_result=dx, treatment_plan=tx,
+            dosha_pct=dosha_pct, vikriti_pattern=vikriti,
+            ama_status=ama_status, ama_reasons=ama_reasons,
+            agni_status=agni, koshtha_status=koshtha,
+            dhatus=dhatus, srotas=srotas, dasha=dasha,
+        ))
     else:
-        st.success("✅ **Clean & Clear**: No significant toxic residue detected in your tongue or bowels.")
+        dx        = st.session_state["diagnosis_result"]
+        tx        = st.session_state["treatment_plan"]
+        dosha_pct = st.session_state["dosha_pct"]
+        vikriti   = st.session_state["vikriti_pattern"]
+        ama_status= st.session_state["ama_status"]
+        ama_reasons=st.session_state["ama_reasons"]
+        agni      = st.session_state["agni_status"]
+        koshtha   = st.session_state["koshtha_status"]
+        dhatus    = st.session_state["dhatus"]
+        srotas    = st.session_state["srotas"]
+        dasha     = st.session_state["dasha"]
 
-    with st.expander("📜 For Doctors & Curious Readers (Classical Sanskrit Details)"):
-        st.write(f"**Sanskrit Name:** {diagnosis_result.sanskrit_name}")
-        st.write(f"**Dhatu (Tissues Involved):** {', '.join(diagnosis_result.dhatu_involved)}")
-        st.write(f"**Srotas (Channels):** {', '.join(diagnosis_result.srotas_involved)}")
-        st.write(f"**Classical References:** {', '.join(diagnosis_result.classical_citations)}")
+    # ════════════════════════════════════════
+    # SECTION 1: DIAGNOSIS
+    # ════════════════════════════════════════
+    prognosis = getattr(dx, "prognosis", "Sadhya")
+    st.markdown(f"""
+    <div class="an-dx-card">
+        <div class="condition">{dx.primary_condition}</div>
+        <div class="sanskrit">Sanskrit: {dx.sanskrit_name}</div>
+        <span class="an-dx-badge">⚖ {dx.doshic_subtype}</span>
+        <span class="an-dx-badge">📊 {prognosis}</span>
+    </div>
+    """, unsafe_allow_html=True)
 
-# ----------------- TAB 3: TREATMENT PLAN (LAYMAN) -----------------
-with tab3:
-    st.markdown(f"## 💊 Your Simple Healing & Recovery Plan for {patient_name}")
-    st.markdown("Here is your practical, everyday guide to feeling better naturally.")
+    # Secondary conditions
+    sec = getattr(dx, "secondary_conditions", [])
+    if sec:
+        st.markdown("<div style='font-size:0.8rem;color:#6B4C30;margin:-0.5rem 0 1rem;'>Also consider: " +
+                    " · ".join(f"<em>{s}</em>" for s in sec[:3]) + "</div>", unsafe_allow_html=True)
 
-    # Step 1: Detox
-    st.markdown("<div class='ayur-card-gold'>", unsafe_allow_html=True)
-    st.markdown("### 1️⃣ Morning Reset & Digestive Boost")
-    st.markdown("Before taking any heavy medicines, we need to ignite your natural digestive fire so your body absorbs nutrients:")
-    for dp in treatment_plan.deepana_pachana_protocol:
-        st.markdown(f"• **{dp}**")
-    st.markdown("</div>", unsafe_allow_html=True)
+    # ════════════════════════════════════════
+    # SECTION 2: DOSHA BALANCE
+    # ════════════════════════════════════════
+    st.markdown('<div class="an-section-div"><span class="text">Your Doshic Constitution</span></div>', unsafe_allow_html=True)
 
-    # Step 2: Medicines
-    st.markdown("### 2️⃣ Recommended Herbal Formulations")
-    st.markdown("These classical herbs are selected to calm your specific imbalance:")
-    
-    for f in treatment_plan.shamana_formulations:
+    doshas = [
+        ("Vata", "💨", "Air & Movement — nerves, joints, elimination"),
+        ("Pitta","🔥", "Fire & Metabolism — digestion, skin, intelligence"),
+        ("Kapha","🌊", "Water & Structure — immunity, fluids, stability"),
+    ]
+    for dname, demoji, ddesc in doshas:
+        pct = dosha_pct.get(dname, 33.3)
+        tc, fc, bc = _dosha_color(dname)
         st.markdown(f"""
-        <div class='question-box' style='border-left: 5px solid #2B6CB0;'>
-            <h4 style='margin:0; color:#1A365D;'>🌿 {f.name}</h4>
-            <p style='margin:4px 0; font-size:1rem;'><strong>Why take it:</strong> {f.classical_indication}</p>
-            <p style='margin:2px 0; color:#4A5568;'><strong>How much:</strong> {f.dosage} &bull; <strong>Take with:</strong> {f.anupana_vehicle}</p>
-            <p style='margin:2px 0; color:#2B6CB0; font-weight:600;'><strong>When:</strong> {f.aushadha_sevana_kala} (for {f.duration_weeks} weeks)</p>
+        <div class="dosha-row">
+            <div class="dosha-row-top">
+                <span class="dosha-row-name" style="color:{tc};">{demoji} {dname}</span>
+                <span class="dosha-row-pct" style="color:{tc};">{pct:.0f}%</span>
+            </div>
+            <div class="dosha-track">
+                <div class="dosha-fill" style="width:{pct:.1f}%;background:{fc};"></div>
+            </div>
+            <div style="font-size:0.76rem;color:#6B4C30;margin-top:3px;">{ddesc}</div>
         </div>
         """, unsafe_allow_html=True)
 
-    # Step 3: Food
-    st.markdown("### 3️⃣ Your Kitchen Guide: What to Eat & What to Avoid")
-    fcol1, fcol2 = st.columns(2)
-    with fcol1:
-        st.markdown("<div class='ayur-card-green'>", unsafe_allow_html=True)
-        st.markdown("#### 🟢 Enjoy These Foods:")
-        for item in treatment_plan.dietary_and_lifestyle_regimen.pathya_ahara_wholesome_diet[:5]:
-            st.write(f"✓ {item}")
+    # ════════════════════════════════════════
+    # SECTION 3: INTERNAL STATE
+    # ════════════════════════════════════════
+    st.markdown('<div class="an-section-div"><span class="text">Internal State Assessment</span></div>', unsafe_allow_html=True)
+
+    agni_v, agni_sub = _agni_html(agni)
+    kv, ks = _koshtha_html(koshtha)
+    mc1, mc2, mc3 = st.columns(3)
+    with mc1:
+        st.markdown(f"""<div class="an-mini-metric">
+            <div class="m-label">Ama (Toxin Level)</div>
+            <div class="m-value">{_ama_html(ama_status)}</div>
+        </div>""", unsafe_allow_html=True)
+    with mc2:
+        st.markdown(f"""<div class="an-mini-metric">
+            <div class="m-label">Agni (Digestive Fire)</div>
+            <div class="m-value">{agni_v}</div>
+            <div class="m-sub">{agni_sub}</div>
+        </div>""", unsafe_allow_html=True)
+    with mc3:
+        st.markdown(f"""<div class="an-mini-metric">
+            <div class="m-label">Koshtha (Bowel Type)</div>
+            <div class="m-value" style="color:#3D1F08;font-weight:700;">{kv}</div>
+            <div class="m-sub">{ks}</div>
+        </div>""", unsafe_allow_html=True)
+
+    # Affected tissues
+    if dhatus or srotas:
+        st.markdown("<div style='margin-top:0.8rem;'></div>", unsafe_allow_html=True)
+        tc_col, sc_col = st.columns(2)
+        with tc_col:
+            if dhatus:
+                st.markdown(f"<div style='font-size:0.75rem;font-weight:700;color:#7C4A20;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:4px;'>Tissues Affected (Dhatu)</div>"
+                            + "".join(f"<span class='sym-chip-mild'>{d}</span>" for d in dhatus[:4]),
+                            unsafe_allow_html=True)
+        with sc_col:
+            if srotas:
+                st.markdown(f"<div style='font-size:0.75rem;font-weight:700;color:#7C4A20;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:4px;'>Channels Affected (Srotas)</div>"
+                            + "".join(f"<span class='sym-chip-mild'>{s}</span>" for s in srotas[:4]),
+                            unsafe_allow_html=True)
+
+    # Ama reasoning
+    if ama_reasons:
+        with st.expander("Why is Ama present? (Clinical reasoning)", expanded=False):
+            for r in ama_reasons:
+                st.markdown(f"- {r}")
+
+    # ════════════════════════════════════════
+    # SECTION 4: HEALING PLAN
+    # ════════════════════════════════════════
+    st.markdown('<div class="an-section-div"><span class="text">Your Healing Plan</span></div>', unsafe_allow_html=True)
+
+    # Phase 1: Deepana-Pachana
+    deepana = getattr(tx, "deepana_pachana_protocol", [])
+    if deepana:
+        st.markdown("<div class='an-label'>Phase 1 — Rekindle Digestive Fire First</div>", unsafe_allow_html=True)
+        st.markdown("<div class='an-card-warm'>", unsafe_allow_html=True)
+        for dp in deepana:
+            st.markdown(f"<div style='padding:6px 0;border-bottom:1px solid #EDE5D8;font-size:0.9rem;color:#3D1F08;'>🍵 {dp}</div>",
+                        unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    with fcol2:
-        st.markdown("<div class='ayur-card-red'>", unsafe_allow_html=True)
-        st.markdown("#### 🔴 Avoid or Cut Down On:")
-        for item in treatment_plan.dietary_and_lifestyle_regimen.apathya_ahara_unwholesome_diet[:5]:
-            st.write(f"✗ {item}")
+    # Phase 2: Herbal formulations
+    formulas = getattr(tx, "shamana_formulations", [])
+    if formulas:
+        st.markdown("<div class='an-label' style='margin-top:1rem;'>Phase 2 — Classical Herbal Formulations</div>", unsafe_allow_html=True)
+        for i, f in enumerate(formulas):
+            tag_cls, tag_lbl = _tag(getattr(f,"category",""))
+            dosage  = getattr(f,"dosage","")
+            anupana = getattr(f,"anupana_vehicle","")
+            kala    = getattr(f,"aushadha_sevana_kala","")
+            ref     = getattr(f,"classical_reference","")
+            ind     = getattr(f,"classical_indication","")
+            dur     = getattr(f,"duration_weeks",None)
+            st.markdown(f"""
+            <div class="an-remedy">
+                <div class="an-remedy-name">
+                    {i+1}. {f.name}
+                    <span class="an-tag {tag_cls}">{tag_lbl}</span>
+                    {f'<span style="font-size:0.76rem;color:#6B4C30;margin-left:8px;">{dur} weeks</span>' if dur else ''}
+                </div>
+                <div class="an-remedy-ind">{ind}</div>
+                <div class="an-remedy-meta">
+                    <span>💊 {dosage}</span>
+                    <span>🥛 {anupana}</span>
+                    <span>⏰ {kala}</span>
+                </div>
+                {f'<div class="an-remedy-ref">📖 {ref}</div>' if ref else ''}
+            </div>
+            """, unsafe_allow_html=True)
+
+    # Phase 3: Diet
+    dietary = getattr(tx, "dietary_and_lifestyle_regimen", None)
+    if dietary:
+        good_food = (getattr(dietary,"pathya_ahara_wholesome_diet",None)
+                     or getattr(dietary,"pathya_ahara_beneficial_foods",[]))
+        bad_food  = (getattr(dietary,"apathya_ahara_unwholesome_diet",None)
+                     or getattr(dietary,"apathya_ahara_contraindicated_foods",[]))
+        good_life = (getattr(dietary,"pathya_vihara_recommended_lifestyle",None)
+                     or getattr(dietary,"pathya_vihara_beneficial_lifestyle",[]))
+        bad_life  = getattr(dietary,"apathya_vihara_contraindicated_habits",[])
+
+        if good_food or bad_food:
+            st.markdown("<div class='an-label' style='margin-top:1rem;'>Phase 3 — Food as Medicine</div>", unsafe_allow_html=True)
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                st.markdown("<div class='an-card-success'><div style='font-weight:700;color:#14532D;margin-bottom:8px;font-size:0.9rem;'>✅ Eat More Of</div>", unsafe_allow_html=True)
+                for item in good_food:
+                    st.markdown(f"<div class='food-good'><span>✓</span><span>{item}</span></div>", unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+            with fc2:
+                st.markdown("<div class='an-card-danger'><div style='font-weight:700;color:#7F1D1D;margin-bottom:8px;font-size:0.9rem;'>❌ Avoid These</div>", unsafe_allow_html=True)
+                for item in bad_food:
+                    st.markdown(f"<div class='food-bad'><span>✗</span><span>{item}</span></div>", unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+        if good_life or bad_life:
+            with st.expander("Daily Routine & Lifestyle (Dinacharya)", expanded=False):
+                lc1, lc2 = st.columns(2)
+                with lc1:
+                    st.markdown("**✅ Recommended Habits**")
+                    for h in good_life: st.markdown(f"- {h}")
+                with lc2:
+                    if bad_life:
+                        st.markdown("**❌ Habits to Avoid**")
+                        for h in bad_life: st.markdown(f"- {h}")
+
+    # Other phases (collapsed)
+    panchakarma = getattr(tx,"panchakarma_roadmap",None)
+    if panchakarma:
+        with st.expander("🌊 Panchakarma & Detox Roadmap (Phase 4)", expanded=False):
+            for k, v in (panchakarma if isinstance(panchakarma,dict) else {}).items():
+                st.markdown(f"**{k}:** {v}")
+
+    yoga = getattr(tx,"yoga_pranayama",None)
+    if yoga:
+        with st.expander("🧘 Yoga & Pranayama (Phase 5)", expanded=False):
+            if isinstance(yoga,list):
+                for y in yoga: st.markdown(f"- {y}")
+            elif isinstance(yoga,dict):
+                for k,v in yoga.items(): st.markdown(f"**{k}:** {v}")
+
+    rasayana = getattr(tx,"rasayana_rejuvenation",None)
+    if rasayana:
+        with st.expander("✨ Rasayana — Rejuvenation (Phase 6)", expanded=False):
+            if isinstance(rasayana,list):
+                for r in rasayana: st.markdown(f"- {r}")
+
+    # Red flags
+    red_flags = getattr(tx,"red_flag_warnings",[])
+    if red_flags:
+        st.markdown("""<div class="an-card-danger" style="margin-top:1.2rem;">
+            <div style="font-weight:700;color:#7F1D1D;margin-bottom:8px;">
+                🚨 Seek Emergency Medical Care If You Experience:
+            </div>""", unsafe_allow_html=True)
+        for rf in red_flags:
+            st.markdown(f"<div style='padding:4px 0;font-size:0.88rem;color:#991B1B;'>• {rf}</div>",
+                        unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Bad Food Combinations
-    st.markdown("#### ⚠️ Incompatible Food Habits (Never Do These):")
-    for warn in treatment_plan.dietary_and_lifestyle_regimen.viruddha_ahara_warnings[:3]:
-        st.markdown(f"• **{warn}**")
+    # ════════════════════════════════════════
+    # SECTION 5: ASK AYURVAIDYA
+    # ════════════════════════════════════════
+    st.markdown('<div class="an-section-div"><span class="text">Ask AyurVaidya</span></div>', unsafe_allow_html=True)
+    st.markdown("<div style='font-size:0.88rem;color:#6B4C30;margin-bottom:0.8rem;'>Have questions about your diet, remedies, or daily routine? Ask below.</div>",
+                unsafe_allow_html=True)
 
-    # Yoga & Daily Routine
-    st.markdown("### 4️⃣ Simple Habits & Movements")
-    ycol1, ycol2 = st.columns(2)
-    with ycol1:
-        st.markdown("**Daily Habits:**")
-        for hab in treatment_plan.dietary_and_lifestyle_regimen.pathya_vihara_recommended_lifestyle[:3]:
-            st.write(f"• {hab}")
-    with ycol2:
-        st.markdown("**Easy Breathing & Gentle Poses:**")
-        for yg in treatment_plan.dietary_and_lifestyle_regimen.yoga_and_pranayama:
-            st.write(f"• {yg}")
-
-    # Red Flags
-    if treatment_plan.red_flag_warnings:
-        st.markdown("<div class='ayur-card-red'>", unsafe_allow_html=True)
-        st.markdown("#### 🚨 When to See an Emergency Doctor Immediately:")
-        st.markdown("If you experience any of these serious signs, please visit a modern hospital immediately:")
-        for rf in treatment_plan.red_flag_warnings:
-            st.write(f"• {rf}")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-# ----------------- TAB 4: ASK ANY QUESTION -----------------
-with tab4:
-    st.markdown("## 💬 Ask Any Question in Everyday Language")
-    st.markdown("Have a question about what tea to drink, what breakfast to eat, or why your body hurts? Ask here:")
-
-    quick_questions = [
-        "What is the best breakfast for my condition?",
-        "Can I drink coffee or green tea with my symptoms?",
-        "Why do my joints click more when it gets cold?",
-        "How do I clear the white coating on my tongue naturally?"
+    # Quick questions as buttons
+    quick_qs = [
+        f"Best breakfast and dinner for {dx.primary_condition}?",
+        "What kitchen remedies can I use daily at home?",
+        "How long will it take to see improvement?",
+        "What should I avoid doing or eating right now?",
     ]
-    
-    selected_quick = st.selectbox("Or choose a common question:", ["Type my own question below..."] + quick_questions)
-    
-    default_q = selected_quick if selected_quick != "Type my own question below..." else f"Explain in simple layman terms what I should do every morning to recover from {diagnosis_result.primary_condition}."
-    user_patient_q = st.text_input("Your Question:", value=default_q)
+    qc1, qc2 = st.columns(2)
+    for i, q in enumerate(quick_qs):
+        with (qc1 if i % 2 == 0 else qc2):
+            if st.button(q, key=f"qq_{i}", use_container_width=True):
+                st.session_state["prefill_q"] = q
 
-    if st.button("Get My Answer", type="primary"):
-        with st.spinner("Analyzing with Ayurvedic knowledge and your notebook..."):
-            ai = st.session_state.ai_consultant
-            ans = ai.synthesize_consultation(
-                patient_summary=f"Patient {patient_name}, Age {patient_age}. Story: {user_story}. Active complaints: {', '.join(current_selected)}.",
-                diagnosis_summary=f"Condition: {diagnosis_result.primary_condition}. Dosha: {diagnosis_result.doshic_subtype}. Toxin/Ama: {diagnosis_result.ama_status.value}.",
-                treatment_summary=f"Formulations: {', '.join([f.name for f in treatment_plan.shamana_formulations])}",
-                user_question=f"Answer in simple, friendly, empathetic layman English without overwhelming medical terms. Focus on practical home remedies and actionable advice: {user_patient_q}"
-            )
-            st.markdown("<div class='ayur-card-gold'>", unsafe_allow_html=True)
-            st.markdown("### 🌿 Ayurvedic Guidance for You:")
-            st.markdown(ans)
-            st.markdown("</div>", unsafe_allow_html=True)
+    prefill = st.session_state.pop("prefill_q", None) or ""
+    user_q  = st.text_area(
+        "Your question",
+        value=prefill if prefill else st.session_state.get("_last_q",""),
+        placeholder="Ask anything about your condition, remedies, foods, or lifestyle...",
+        height=80,
+        key="aq_input",
+        label_visibility="collapsed"
+    )
 
-# ----------------- TAB 5: EXPORT -----------------
-with tab5:
-    st.markdown("## 📄 Your Complete Health Summary & Prescription")
-    
+    ac1, ac2 = st.columns([2,1])
+    with ac1:
+        if st.button("✨ Get Guidance", type="primary", use_container_width=True, key="btn_ask"):
+            if user_q.strip():
+                st.session_state["_last_q"] = user_q
+                with st.spinner("AyurVaidya is consulting the classical texts..."):
+                    name_s  = st.session_state.patient_name
+                    age_s   = st.session_state.patient_age
+                    gender_s= st.session_state.patient_gender
+                    p_sum = f"{name_s}, {age_s} yrs, {gender_s}."
+                    d_sum = f"{dx.primary_condition} ({dx.sanskrit_name}) — {dx.doshic_subtype}"
+                    t_sum = ", ".join([f.name for f in formulas[:3]]) if formulas else "—"
+                    try:
+                        resp = ai.synthesize_consultation(
+                            patient_summary=p_sum,
+                            diagnosis_summary=d_sum,
+                            treatment_summary=t_sum,
+                            user_question=user_q,
+                            mode="layman"
+                        )
+                    except Exception:
+                        resp = "AyurVaidya is currently unavailable. Please check your API key configuration."
+                    st.session_state.last_q_response = resp
+    with ac2:
+        if st.session_state.last_q_response:
+            if st.button("Clear", use_container_width=True):
+                st.session_state.last_q_response = ""
+                st.session_state["_last_q"] = ""
+                st.rerun()
+
+    if st.session_state.last_q_response:
+        st.markdown(f"""
+        <div class="chat-q">{st.session_state.get('_last_q','Your question')}</div>
+        <div class="chat-a">{st.session_state.last_q_response}</div>
+        """, unsafe_allow_html=True)
+
+    # ════════════════════════════════════════
+    # SECTION 6: SAVE & DOWNLOAD
+    # ════════════════════════════════════════
+    st.markdown('<div class="an-section-div"><span class="text">Save Your Plan</span></div>', unsafe_allow_html=True)
+
+    # Build case sheet
     patient_demo = PatientDemographics(
-        name=patient_name,
-        age=patient_age,
-        gender=patient_gender,
-        occupation="General",
-        geographical_region="Local",
-        current_season="Current"
+        name=st.session_state.patient_name,
+        age=int(st.session_state.patient_age),
+        gender=gender,
+        current_season="Current Season"
     )
-
-    ashta_mock = AshtaSthanaPariksha(
+    ashta = AshtaSthanaPariksha(
         nadi_pulse="Pulse matching primary dosha",
-        jihva_tongue=tongue_choice,
-        mutra_urine="Urine check",
-        mala_stool=stool_choice,
-        shabda_voice="Voice clear",
-        sparsha_skin="Skin check",
-        druk_eyes="Eyes clear",
-        akruti_appearance="Habitus check"
+        jihva_tongue=tongue_str,
+        mutra_urine="Normal",
+        mala_stool=stool_str,
+        shabda_voice="Normal",
+        sparsha_skin="Normal",
+        druk_eyes="Clear",
+        akruti_appearance="Moderate"
     )
-
     case_obj = ClinicalCase(
-        patient=patient_demo,
-        ashta_sthana=ashta_mock,
-        dashavidha=dashavidha_mock,
-        chief_complaints=[user_story],
-        onset_and_duration="Recent months",
-        dosha_scores=dosha_pct,
-        diagnosis=diagnosis_result,
-        treatment=treatment_plan
+        patient=patient_demo, ashta_sthana=ashta, dashavidha=dasha,
+        chief_complaints=list(sym.keys())[:8],
+        onset_and_duration="Recent weeks",
+        dosha_scores=dosha_pct, diagnosis=dx, treatment=tx
     )
-
     case_md = generate_markdown_case_sheet(case_obj)
-    
-    st.download_button(
-        label="📥 Download My Health Plan (.md)",
-        data=case_md,
-        file_name=f"AyurNidana_{patient_name.replace(' ', '_')}_HealthPlan.md",
-        mime="text/markdown"
-    )
 
-    st.markdown("---")
-    st.markdown(case_md)
+    sv1, sv2 = st.columns(2)
+    with sv1:
+        if is_guest:
+            st.info("💡 Sign in to save consultations to your account.")
+        else:
+            if st.button("💾 Save to My Records", type="primary", use_container_width=True):
+                story = st.session_state.get("user_story","")
+                cid = save_consultation(
+                    user_id=user_id,
+                    chief_complaint=story[:300] if story else ", ".join(list(sym.keys())[:4]),
+                    symptoms=list(sym.keys()),
+                    primary_condition=dx.primary_condition,
+                    sanskrit_name=dx.sanskrit_name,
+                    dosha_scores=dosha_pct,
+                    treatment_summary=", ".join([f.name for f in formulas[:2]]) if formulas else "",
+                    case_sheet_md=case_md
+                )
+                if cid:
+                    st.success("✅ Saved to your health records!")
+                else:
+                    st.error("Failed to save. Please try again.")
+    with sv2:
+        st.download_button(
+            "📥 Download Health Plan (.md)",
+            data=case_md,
+            file_name=f"AyurNidana_{st.session_state.patient_name.replace(' ','_')}_HealthPlan.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
+
+    with st.expander("📄 Preview Clinical Case Sheet", expanded=False):
+        st.markdown(case_md)
+
+
+# ─────────────────────────────────────────────────────────────────
+# HISTORY VIEW
+# ─────────────────────────────────────────────────────────────────
+
+def _render_history(user_id: int, is_guest: bool):
+    st.markdown('<div class="an-page-title">My Health Records</div>', unsafe_allow_html=True)
+    st.markdown('<div class="an-page-sub">All your saved consultations, sorted most recent first.</div>', unsafe_allow_html=True)
+
+    if is_guest:
+        st.markdown("""<div class="an-empty">
+            <div class="ei">🔒</div><h3>Sign In to See History</h3>
+            <p>Guest consultations are not stored. Create a free account to track your Ayurvedic health journey.</p>
+        </div>""", unsafe_allow_html=True)
+        return
+
+    records = get_user_consultations(user_id)
+    if not records:
+        st.markdown("""<div class="an-empty">
+            <div class="ei">📋</div><h3>No Records Yet</h3>
+            <p>Complete a consultation and save it — it will appear here.</p>
+        </div>""", unsafe_allow_html=True)
+        if st.button("Start a Consultation →", type="primary"):
+            st.session_state.view = "input"
+            st.rerun()
+        return
+
+    st.markdown(f"**{len(records)} saved consultation{'s' if len(records)!=1 else ''}**")
+    st.markdown("")
+
+    for rec in records:
+        date_str  = rec["created_at"][:10]
+        d_scores  = rec.get("dosha_scores",{})
+        dominant  = max(d_scores, key=d_scores.get) if d_scores else "—"
+        dom_tc, dom_fc, _ = _dosha_color(dominant)
+
+        with st.expander(f"🩺 {rec['primary_condition']} — {date_str}", expanded=False):
+            hc1, hc2 = st.columns([3,2])
+            with hc1:
+                st.markdown(f"**{rec['primary_condition']}**")
+                st.caption(f"*{rec['sanskrit_name']}*")
+                if rec.get("chief_complaint"):
+                    st.markdown(f"<div style='font-size:0.87rem;color:#3D1F08;margin-top:6px;'>{rec['chief_complaint'][:200]}</div>",
+                                unsafe_allow_html=True)
+                if rec.get("treatment_summary"):
+                    st.markdown(f"<div style='font-size:0.83rem;color:#5C3D20;margin-top:5px;'>💊 {rec['treatment_summary']}</div>",
+                                unsafe_allow_html=True)
+            with hc2:
+                if d_scores:
+                    for d, v in d_scores.items():
+                        tc2, fc2, _ = _dosha_color(d)
+                        st.markdown(f"""
+                        <div style='display:flex;align-items:center;gap:8px;margin-bottom:5px;'>
+                            <span style='font-size:0.8rem;font-weight:700;color:{tc2};width:46px;'>{d}</span>
+                            <div style='flex:1;background:#EDE5D8;border-radius:4px;height:7px;'>
+                                <div style='width:{v:.0f}%;background:{fc2};height:7px;border-radius:4px;'></div>
+                            </div>
+                            <span style='font-size:0.78rem;color:#6B4C30;width:30px;text-align:right;'>{v:.0f}%</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+            if rec.get("case_sheet_md"):
+                st.download_button(
+                    "📥 Download Case Sheet",
+                    data=rec["case_sheet_md"],
+                    file_name=f"AyurNidana_{rec['primary_condition'].replace(' ','_')}_{date_str}.md",
+                    mime="text/markdown",
+                    key=f"dl_{rec['id']}"
+                )
+
+
+# ─────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as _e:
+        import traceback
+        st.error("🌿 AyurNidana encountered an issue. Please refresh.")
+        with st.expander("Technical details"):
+            st.code(traceback.format_exc())
